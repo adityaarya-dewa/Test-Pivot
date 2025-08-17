@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>PM Pivot — Material per Tahun</title>
+
+<!-- PapaParse (CSV parsing) -->
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+
+<style>
+  :root{--bg:#f7fafc;--card:#ffffff;--muted:#4b5563;--accent:#0f172a;}
+  body{font-family:Inter, system-ui, -apple-system, 'Segoe UI', Roboto, Arial; margin:18px; background:var(--bg); color:var(--accent);}
+  .container{max-width:1200px;margin:0 auto;}
+  .card{background:var(--card);border-radius:12px;padding:14px;box-shadow:0 8px 30px rgba(2,6,23,0.06);margin-bottom:14px;}
+  h1{font-size:20px;margin:0 0 8px;}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+  label{font-size:13px;color:var(--muted);}
+  select,input[type=text]{padding:8px;border:1px solid #e6eef6;border-radius:8px;}
+  button{background:var(--accent);color:white;padding:8px 12px;border-radius:8px;border:0;cursor:pointer;}
+  table{border-collapse:collapse;width:100%;font-size:13px;}
+  th,td{border:1px solid #e6eef6;padding:8px;text-align:left;}
+  th{background:#f1f5f9;position:sticky;top:0;z-index:2;}
+  .hint{color:var(--muted);font-size:13px;}
+  .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;}
+  .small{font-size:12px;padding:6px;border-radius:6px;}
+  .toolbar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+  .flex-col{display:flex;flex-direction:column;gap:8px}
+  @media (max-width:800px){ .row{flex-direction:column;align-items:stretch} th,td{font-size:12px} }
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>PM Pivot — Material per Tahun</h1>
+      <div class="hint">Format pivot: <b>PM Service, KIMAP, Material</b> sebagai baris, kolom dinamis per <b>Tahun</b>, nilai: jumlah <b>Qty</b>.</div>
+
+      <div class="toolbar" style="margin-top:12px;">
+        <div class="row">
+          <label>Auto-load Table.csv:</label>
+          <button id="tryLoadBtn" class="small">Try load Table.csv</button>
+          <label style="margin-left:6px;">atau pilih file:</label>
+          <input id="fileInput" type="file" accept=".csv" style="display:inline-block"/>
+        </div>
+
+        <div class="row">
+          <button id="exportBtn">Export Pivot CSV</button>
+          <div class="hint" style="margin-left:8px;">(Exporting currently visible pivot table)</div>
+        </div>
+      </div>
+
+      <div style="margin-top:10px" class="controls">
+        <div>
+          <label>Filter Year (multi):</label>
+          <select id="yearFilter" multiple size="3" class="small" style="min-width:140px"></select>
+        </div>
+        <div>
+          <label>Filter Tag Number:</label>
+          <select id="tagFilter" class="small"></select>
+        </div>
+        <div>
+          <label>Filter PM Service:</label>
+          <select id="pmFilter" class="small"></select>
+        </div>
+        <div>
+          <label>Search Material:</label>
+          <input id="materialSearch" type="text" placeholder="ketik sebagian nama material..." />
+        </div>
+        <div>
+          <label>Show Years:</label>
+          <div id="yearCheckboxes" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="applyBtn">Generate Pivot</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="pivotCard" class="card">
+      <div id="pivotInfo" class="hint">Belum ada data. Silakan klik <b>Try load Table.csv</b> atau pilih file <b>Table.csv</b>.</div>
+      <div id="pivotArea" style="margin-top:12px;overflow:auto;"></div>
+    </div>
+  </div>
+
+<script>
+/*
+Robust pivot generator:
+- Expects CSV with columns: Year, Tag Number, PM Service, KIMAP, Material, Qty
+- Builds cross-tab: index = PM Service, KIMAP, Material; columns = Years; values = sum(Qty)
+- Filtering & searching available before generating pivot
+*/
+
+const tryLoadBtn = document.getElementById('tryLoadBtn');
+const fileInput = document.getElementById('fileInput');
+const pivotArea = document.getElementById('pivotArea');
+const pivotInfo = document.getElementById('pivotInfo');
+
+let RAW = []; // array of objects
+let YEARS = []; // unique years
+let TAGS = [];
+let PMS = [];
+
+// util: parse number safely
+function toNumber(v){
+  if(v === null || v === undefined || v === '') return 0;
+  // remove commas and parse
+  const s = String(v).replace(/,/g,'').trim();
+  if(s === '') return 0;
+  const n = Number(s);
+  return isNaN(n) ? 0 : n;
+}
+
+// load CSV text via fetch (works if served over http and Table.csv present)
+async function tryAutoLoad(){
+  try {
+    const r = await fetch('Table.csv');
+    if(!r.ok) throw new Error('not ok');
+    const txt = await r.text();
+    handleCsvText(txt);
+  } catch(err) {
+    // cannot auto-load (likely local file blocked). Show message and show file picker.
+    pivotInfo.innerHTML = '<span class="hint">Auto-load gagal (browser memblokir akses file://). Silakan pilih file Table.csv lewat tombol "Choose file" di kiri.</span>';
+    console.warn('Auto-load failed:', err);
+  }
+}
+
+// parse CSV and normalize fields
+function handleCsvText(csvText){
+  const res = Papa.parse(csvText.trim(), { header: true, skipEmptyLines: true });
+  const data = res.data.map(r => {
+    // Normalize keys trimming spaces
+    const obj = {};
+    for(const k in r) obj[k.trim()] = (r[k] === undefined ? '' : r[k]);
+    return obj;
+  });
+  RAW = data;
+  prepareLookups();
+  populateFilters();
+  // by default, show pivot immediately (as user requested "langsung aja")
+  generatePivot();
+}
+
+// prepare unique lists
+function prepareLookups(){
+  const yrs = new Set();
+  const tags = new Set();
+  const pms = new Set();
+  for(const r of RAW){
+    if(r['Year'] !== undefined) yrs.add(String(r['Year']).trim());
+    if(r['Tag Number'] !== undefined) tags.add(String(r['Tag Number']).trim());
+    if(r['PM Service'] !== undefined) pms.add(String(r['PM Service']).trim());
+  }
+  YEARS = Array.from(yrs).filter(x=>x!=='').sort();
+  TAGS = Array.from(tags).filter(x=>x!=='').sort();
+  PMS = Array.from(pms).filter(x=>x!=='').sort();
+}
+
+// populate filter controls
+function populateFilters(){
+  const yearFilter = document.getElementById('yearFilter');
+  const tagFilter = document.getElementById('tagFilter');
+  const pmFilter = document.getElementById('pmFilter');
+  const yearCheckboxes = document.getElementById('yearCheckboxes');
+
+  yearFilter.innerHTML = '';
+  tagFilter.innerHTML = '<option value="">(All)</option>';
+  pmFilter.innerHTML = '<option value="">(All)</option>';
+  yearCheckboxes.innerHTML = '';
+
+  for(const y of YEARS){
+    const opt = document.createElement('option');
+    opt.value = y; opt.textContent = y;
+    yearFilter.appendChild(opt);
+
+    const cb = document.createElement('label');
+    cb.style.display = 'inline-flex'; cb.style.alignItems = 'center';
+    cb.style.gap = '4px';
+    const chk = document.createElement('input');
+    chk.type = 'checkbox'; chk.value = y; chk.checked = true; chk.className = 'yearCheck';
+    cb.appendChild(chk);
+    const txt = document.createElement('span'); txt.textContent = y; txt.style.fontSize='13px';
+    cb.appendChild(txt);
+    yearCheckboxes.appendChild(cb);
+  }
+
+  for(const t of TAGS){
+    const o = document.createElement('option'); o.value = t; o.textContent = t; tagFilter.appendChild(o);
+  }
+  for(const p of PMS){
+    const o = document.createElement('option'); o.value = p; o.textContent = p; pmFilter.appendChild(o);
+  }
+}
+
+// build pivot from RAW using current filters/search
+function buildPivotData(){
+  // gather filters
+  const selectedYears = Array.from(document.querySelectorAll('.yearCheck')).filter(x=>x.checked).map(x=>x.value);
+  const tagVal = document.getElementById('tagFilter').value;
+  const pmVal = document.getElementById('pmFilter').value;
+  const matSearch = document.getElementById('materialSearch').value.trim().toLowerCase();
+
+  // create map: key = PM Service + '||' + KIMAP + '||' + Material, value = { pmService, kimap, material, yearSums: {year: sum} }
+  const map = new Map();
+  for(const r of RAW){
+    const year = String(r['Year'] ?? '').trim();
+    if(selectedYears.length && selectedYears.indexOf(year) === -1) continue;
+    if(tagVal && String(r['Tag Number'] ?? '') !== tagVal) continue;
+    if(pmVal && String(r['PM Service'] ?? '') !== pmVal) continue;
+    const mat = String(r['Material'] ?? '');
+    if(matSearch && mat.toLowerCase().indexOf(matSearch) === -1) continue;
+
+    const pm = String(r['PM Service'] ?? '');
+    const kimap = String(r['KIMAP'] ?? '');
+    const key = pm + '||' + kimap + '||' + mat;
+    if(!map.has(key)){
+      map.set(key, { 'PM Service': pm, 'KIMAP': kimap, 'Material': mat, yearSums: {} });
+    }
+    const entry = map.get(key);
+    const qty = toNumber(r['Qty']);
+    entry.yearSums[year] = (entry.yearSums[year] || 0) + qty;
+  }
+
+  // Convert to array and ensure all displayed years (the union of checkboxes)
+  const yearsToShow = Array.from(document.querySelectorAll('.yearCheck')).filter(x=>x.checked).map(x=>x.value).sort();
+  const rows = [];
+  for(const [k, v] of map.entries()){
+    const row = { 'PM Service': v['PM Service'], 'KIMAP': v['KIMAP'], 'Material': v['Material'] };
+    for(const y of yearsToShow){
+      row[y] = v.yearSums[y] || 0;
+    }
+    rows.push(row);
+  }
+
+  // Sort rows for stable output (by PM Service, then KIMAP, then Material)
+  rows.sort((a,b) => {
+    if(a['PM Service'] !== b['PM Service']) return a['PM Service'].localeCompare(b['PM Service']);
+    if(a['KIMAP'] !== b['KIMAP']) return a['KIMAP'].localeCompare(b['KIMAP']);
+    return a['Material'].localeCompare(b['Material']);
+  });
+
+  return { rows, yearsToShow };
+}
+
+// render pivot HTML table
+function renderPivot(){
+  const out = buildPivotData();
+  const rows = out.rows;
+  const years = out.yearsToShow;
+
+  if(rows.length === 0){
+    pivotArea.innerHTML = '<div class="hint">Tidak ada data setelah filter. Coba atur filter atau pilih semua tahun.</div>';
+    return;
+  }
+
+  // build table HTML
+  let html = '<div style="overflow:auto;"><table><thead><tr>';
+  html += '<th>PM Service</th><th>KIMAP</th><th>Material</th>';
+  for(const y of years) html += `<th>${y}</th>`;
+  html += '<th>Total</th>';
+  html += '</tr></thead><tbody>';
+
+  for(const r of rows){
+    html += '<tr>';
+    html += `<td>${escapeHtml(r['PM Service'])}</td>`;
+    html += `<td>${escapeHtml(r['KIMAP'])}</td>`;
+    html += `<td>${escapeHtml(r['Material'])}</td>`;
+    let rowTotal = 0;
+    for(const y of years){
+      const v = Number(r[y] || 0);
+      rowTotal += v;
+      html += `<td>${formatNumber(v)}</td>`;
+    }
+    html += `<td><strong>${formatNumber(rowTotal)}</strong></td>`;
+    html += '</tr>';
+  }
+
+  // footer totals per column
+  html += '</tbody><tfoot><tr><th colspan="3">Column Total</th>';
+  let grand = 0;
+  for(const y of years){
+    let sum = 0;
+    for(const r of rows) sum += Number(r[y] || 0);
+    grand += sum;
+    html += `<th>${formatNumber(sum)}</th>`;
+  }
+  html += `<th>${formatNumber(grand)}</th></tr></tfoot></table></div>`;
+
+  pivotArea.innerHTML = html;
+}
+
+// helpers
+function escapeHtml(s){ return (s===null||s===undefined) ? '' : String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function formatNumber(n){ return Number(n).toLocaleString('en-US'); }
+
+// Export currently visible pivot to CSV
+function exportPivotCsv(){
+  const out = buildPivotData();
+  const rows = out.rows;
+  const years = out.yearsToShow;
+  if(rows.length === 0){ alert('Tidak ada data untuk di-export'); return; }
+
+  const headers = ['PM Service','KIMAP','Material', ...years, 'Total'];
+  const lines = [headers.join(',')];
+  for(const r of rows){
+    const line = [
+      `"${(r['PM Service']||'').replace(/"/g,'""')}"`,
+      `"${(r['KIMAP']||'').replace(/"/g,'""')}"`,
+      `"${(r['Material']||'').replace(/"/g,'""')}"`
+    ];
+    let rowTotal = 0;
+    for(const y of years){
+      const v = Number(r[y]||0); rowTotal += v;
+      line.push(v);
+    }
+    line.push(rowTotal);
+    lines.push(line.join(','));
+  }
+  const csv = lines.join('\\n');
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'pivot_export.csv'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+// UI event hookups
+document.getElementById('applyBtn').addEventListener('click', () => {
+  renderPivot();
+});
+document.getElementById('exportBtn').addEventListener('click', exportPivotCsv);
+
+document.getElementById('pmFilter').addEventListener('change', () => renderPivot());
+document.getElementById('tagFilter').addEventListener('change', () => renderPivot());
+document.getElementById('materialSearch').addEventListener('input', () => renderPivot());
+
+// allow checking/unchecking years (delegation)
+document.getElementById('yearCheckboxes').addEventListener('change', (e) => {
+  if(e.target && e.target.classList && e.target.classList.contains('yearCheck')) renderPivot();
+});
+
+// Try load button and file input
+tryLoadBtn.addEventListener('click', async () => {
+  pivotInfo.innerHTML = '<div class="hint">Mencoba memuat Table.csv dari lokasi yang sama...</div>';
+  await tryAutoLoad();
+});
+
+fileInput.addEventListener('change', (ev) => {
+  const f = ev.target.files && ev.target.files[0];
+  if(!f) return;
+  const reader = new FileReader();
+  reader.onload = function(e){
+    handleCsvText(String(e.target.result));
+  };
+  reader.readAsText(f);
+});
+
+// If user opened via HTTP and file is present, also attempt auto-load silently
+window.addEventListener('load', () => {
+  // Immediately try fetch (won't work on file:/// due to CORS/local restrictions)
+  tryAutoLoad();
+});
+</script>
+</body>
+</html>
